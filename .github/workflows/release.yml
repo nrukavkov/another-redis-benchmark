@@ -53,7 +53,10 @@ jobs:
 
     - name: Package binary into a ZIP file
       run: |
-        zip another-redis-benchmark-${{ matrix.goos }}-${{ matrix.goarch }}.zip another-redis-benchmark-${{ matrix.goos }}-${{ matrix.goarch }}
+        zip -j another-redis-benchmark-${{ matrix.goos }}-${{ matrix.goarch }}.zip another-redis-benchmark-${{ matrix.goos }}-${{ matrix.goarch }}
+
+    - name: List generated files
+      run: ls -lh another-redis-benchmark-*.zip
 
     - name: Upload ZIP artifact
       uses: actions/upload-artifact@v4
@@ -84,12 +87,14 @@ jobs:
         body: ${{ needs.version.outputs.changelog }}
         generateReleaseNotes: true
 
+    - name: List downloaded files
+      run: ls -lh another-redis-benchmark-*.zip
+
     - name: Upload all release artifacts
-      uses: actions/upload-release-asset@v1
-      with:
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: another-redis-benchmark-*.zip
-        asset_name: another-redis-benchmark-${{ matrix.goos }}-${{ matrix.goarch }}.zip
-        asset_content_type: application/zip
+      run: |
+        for file in another-redis-benchmark-*.zip; do
+          echo "Uploading $file"
+          gh release upload ${{ needs.version.outputs.app_version }} "$file"
+        done
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
