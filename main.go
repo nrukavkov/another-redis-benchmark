@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"math/rand"
 	"sync"
 	"time"
@@ -25,6 +26,14 @@ var (
 	getRatio     float64
 	delRatio     float64
 )
+
+type operationStats struct {
+	minTime   float64
+	maxTime   float64
+	totalTime float64
+	count     int
+	mu        sync.Mutex
+}
 
 func init() {
 	flag.StringVar(&redisAddr, "addr", "localhost:6379", "Redis server address")
@@ -70,9 +79,14 @@ func main() {
 	var totalSet, totalGet, totalDel int
 	var lock sync.Mutex
 
+	// Statistics
+	setStats := operationStats{minTime: math.MaxFloat64}
+	getStats := operationStats{minTime: math.MaxFloat64}
+	delStats := operationStats{minTime: math.MaxFloat64}
+
 	keys := generateKeys(numKeys, keyPrefix)
 
-	// Statistics per user
+	// Progress tracking
 	progress := make([]map[string]int, numClients)
 	for i := range progress {
 		progress[i] = map[string]int{"set": 0, "get": 0, "del": 0}
@@ -84,7 +98,8 @@ func main() {
 	// Start client workers
 	for i := 0; i < numClients; i++ {
 		wg.Add(1)
-		go clientWorker(ctx, rdb, keys, ttl, setRatio, getRatio, delRatio, progress[i], &totalSet, &totalGet, &totalDel, &lock, stop, &wg)
+		go clientWorker(ctx, rdb, keys, ttl, setRatio, getRatio, delRatio, progress[i],
+			&totalSet, &totalGet, &totalDel, &lock, stop, &setStats, &getStats, &delStats, &wg)
 	}
 
 	// Start statistics reporter
@@ -109,6 +124,11 @@ func main() {
 	fmt.Printf("Average SET ops/sec: %.2f\n", float64(totalSet)/testDuration.Seconds())
 	fmt.Printf("Average GET ops/sec: %.2f\n", float64(totalGet)/testDuration.Seconds())
 	fmt.Printf("Average DEL ops/sec: %.2f\n", float64(totalDel)/testDuration.Seconds())
+
+	// Print latency statistics
+	printStats("SET", &setStats)
+	printStats("GET", &getStats)
+	printStats("DEL", &delStats)
 }
 
 func generateKeys(numKeys int, prefix string) []string {
@@ -138,6 +158,7 @@ func clientWorker(
 	totalSet, totalGet, totalDel *int,
 	lock *sync.Mutex,
 	stop <-chan struct{},
+	setStats, getStats, delStats *operationStats,
 	wg *sync.WaitGroup,
 ) {
 	defer wg.Done()
@@ -150,10 +171,14 @@ func clientWorker(
 		default:
 			op := rand.Float64()
 			key := keys[rand.Intn(len(keys))]
+
 			if op < setRatio {
 				// SET operation
 				value := randomString(100)
+				start := time.Now()
 				if err := rdb.Set(ctx, key, value, ttl).Err(); err == nil {
+					duration := time.Since(start).Seconds() * 1000
+					updateStats(setStats, duration)
 					lock.Lock()
 					progress["set"]++
 					*totalSet++
@@ -161,7 +186,10 @@ func clientWorker(
 				}
 			} else if op < setRatio+getRatio {
 				// GET operation
+				start := time.Now()
 				if _, err := rdb.Get(ctx, key).Result(); err == nil || err == redis.Nil {
+					duration := time.Since(start).Seconds() * 1000
+					updateStats(getStats, duration)
 					lock.Lock()
 					progress["get"]++
 					*totalGet++
@@ -169,7 +197,10 @@ func clientWorker(
 				}
 			} else {
 				// DEL operation
+				start := time.Now()
 				if err := rdb.Del(ctx, key).Err(); err == nil {
+					duration := time.Since(start).Seconds() * 1000
+					updateStats(delStats, duration)
 					lock.Lock()
 					progress["del"]++
 					*totalDel++
@@ -180,13 +211,40 @@ func clientWorker(
 	}
 }
 
+func updateStats(stats *operationStats, duration float64) {
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
+
+	stats.count++
+	stats.totalTime += duration
+	if duration < stats.minTime {
+		stats.minTime = duration
+	}
+	if duration > stats.maxTime {
+		stats.maxTime = duration
+	}
+}
+
+func printStats(operation string, stats *operationStats) {
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
+
+	avgTime := 0.0
+	if stats.count > 0 {
+		avgTime = stats.totalTime / float64(stats.count)
+	}
+
+	fmt.Printf("%s Latency (ms): Min=%.2f, Avg=%.2f, Max=%.2f\n",
+		operation, stats.minTime, avgTime, stats.maxTime)
+}
+
 func reportProgress(progress []map[string]int, totalSet, totalGet, totalDel *int, stop <-chan struct{}) {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
 	numClients := len(progress)
 
-	// Напечатать статический список клиентов и общую строку один раз
+	// Print initial rows
 	for i := 0; i < numClients; i++ {
 		fmt.Printf("Client %d: SET=0, GET=0, DEL=0\n", i+1)
 	}
@@ -195,18 +253,18 @@ func reportProgress(progress []map[string]int, totalSet, totalGet, totalDel *int
 	for {
 		select {
 		case <-stop:
-			fmt.Print("\033[0m") // Сброс форматирования при завершении
+			fmt.Print("\033[0m") // Reset formatting
 			return
 		case <-ticker.C:
-			// Переместить курсор вверх на количество строк клиентов + строку Total
+			// Move cursor up
 			fmt.Printf("\033[%dA", numClients+1)
 
-			// Обновить прогресс для каждого клиента
+			// Print updated rows
 			for i, p := range progress {
 				fmt.Printf("\033[KClient %d: SET=%d, GET=%d, DEL=%d\n", i+1, p["set"], p["get"], p["del"])
 			}
 
-			// Обновить общую строку
+			// Print updated total
 			fmt.Printf("\033[KTotal: SET=%d, GET=%d, DEL=%d\n", *totalSet, *totalGet, *totalDel)
 		}
 	}
