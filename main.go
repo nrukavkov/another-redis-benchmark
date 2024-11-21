@@ -73,16 +73,22 @@ func main() {
 
 	keys := generateKeys(numKeys, keyPrefix)
 
+	// Signal channel to stop clients
+	stop := make(chan struct{})
+
 	// Start client workers
 	for i := 0; i < numClients; i++ {
 		wg.Add(1)
-		go clientWorker(ctx, rdb, keys, ttl, setRatio, getRatio, delRatio, &setCount, &getCount, &delCount, &totalSize, &lock, &wg)
+		go clientWorker(ctx, rdb, keys, ttl, setRatio, getRatio, delRatio, &setCount, &getCount, &delCount, &totalSize, &lock, stop, &wg)
 	}
 
 	// Run for the specified duration
 	time.Sleep(testDuration)
-	cancel()
 
+	// Signal workers to stop
+	close(stop)
+
+	// Wait for all workers to finish
 	wg.Wait()
 
 	fmt.Println("Benchmark complete.")
@@ -124,6 +130,7 @@ func clientWorker(
 	setCount, getCount, delCount *int,
 	totalSize *int64,
 	lock *sync.Mutex,
+	stop <-chan struct{},
 	wg *sync.WaitGroup,
 ) {
 	defer wg.Done()
@@ -131,13 +138,14 @@ func clientWorker(
 	rand.Seed(time.Now().UnixNano())
 	for {
 		select {
-		case <-ctx.Done():
+		case <-stop:
+			// Gracefully stop the worker
 			return
 		default:
+			// Perform an operation
 			op := rand.Float64()
 			key := keys[rand.Intn(len(keys))]
 			if op < setRatio {
-				// SET operation
 				value := randomString(100)
 				if err := rdb.Set(ctx, key, value, ttl).Err(); err != nil {
 					log.Printf("Failed to set key %s: %v", key, err)
@@ -148,7 +156,6 @@ func clientWorker(
 					lock.Unlock()
 				}
 			} else if op < setRatio+getRatio {
-				// GET operation
 				if _, err := rdb.Get(ctx, key).Result(); err != nil && err != redis.Nil {
 					log.Printf("Failed to get key %s: %v", key, err)
 				} else {
@@ -157,7 +164,6 @@ func clientWorker(
 					lock.Unlock()
 				}
 			} else {
-				// DEL operation
 				if err := rdb.Del(ctx, key).Err(); err != nil {
 					log.Printf("Failed to delete key %s: %v", key, err)
 				} else {
