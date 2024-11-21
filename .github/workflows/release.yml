@@ -11,7 +11,8 @@ jobs:
       app_version: ${{ steps.version.outputs.new_tag }}
       changelog: ${{ steps.version.outputs.changelog }}
     runs-on: ubuntu-latest
-    permissions: write-all
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
