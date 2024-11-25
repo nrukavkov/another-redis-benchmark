@@ -14,17 +14,18 @@ import (
 )
 
 var (
-	redisAddr    string
-	redisPass    string
-	redisDB      int
-	numClients   int
-	numKeys      int
-	keyPrefix    string
-	ttl          time.Duration
-	testDuration time.Duration
-	setRatio     float64
-	getRatio     float64
-	delRatio     float64
+	redisAddr                  string
+	redisPass                  string
+	redisDB                    int
+	numClients                 int
+	numKeys                    int
+	keyPrefix                  string
+	ttl                        time.Duration
+	testDuration               time.Duration
+	setRatio                   float64
+	getRatio                   float64
+	delRatio                   float64
+	totalSetData, totalGetData int64
 )
 
 type operationStats struct {
@@ -99,7 +100,8 @@ func main() {
 	for i := 0; i < numClients; i++ {
 		wg.Add(1)
 		go clientWorker(ctx, rdb, keys, ttl, setRatio, getRatio, delRatio, progress[i],
-			&totalSet, &totalGet, &totalDel, &lock, stop, &setStats, &getStats, &delStats, &wg)
+			&totalSet, &totalGet, &totalDel, &lock, stop, &setStats, &getStats, &delStats, &totalSetData, &totalGetData, &wg)
+
 	}
 
 	// Start statistics reporter
@@ -121,6 +123,8 @@ func main() {
 	fmt.Printf("SET operations: %d\n", totalSet)
 	fmt.Printf("GET operations: %d\n", totalGet)
 	fmt.Printf("DEL operations: %d\n", totalDel)
+	fmt.Printf("Total data sent during SET operations: %.2f MB\n", float64(totalSetData)/(1024*1024))
+	fmt.Printf("Total data retrieved during GET operations: %.2f MB\n", float64(totalGetData)/(1024*1024))
 	fmt.Printf("Average SET ops/sec: %.2f\n", float64(totalSet)/testDuration.Seconds())
 	fmt.Printf("Average GET ops/sec: %.2f\n", float64(totalGet)/testDuration.Seconds())
 	fmt.Printf("Average DEL ops/sec: %.2f\n", float64(totalDel)/testDuration.Seconds())
@@ -159,6 +163,7 @@ func clientWorker(
 	lock *sync.Mutex,
 	stop <-chan struct{},
 	setStats, getStats, delStats *operationStats,
+	totalSetData, totalGetData *int64, // New parameters for data size
 	wg *sync.WaitGroup,
 ) {
 	defer wg.Done()
@@ -174,7 +179,7 @@ func clientWorker(
 
 			if op < setRatio {
 				// SET operation
-				value := randomString(100)
+				value := randomString(100) // Assuming 100 bytes per value
 				start := time.Now()
 				if err := rdb.Set(ctx, key, value, ttl).Err(); err == nil {
 					duration := time.Since(start).Seconds() * 1000
@@ -182,17 +187,20 @@ func clientWorker(
 					lock.Lock()
 					progress["set"]++
 					*totalSet++
+					*totalSetData += int64(len(value)) + int64(len(key)) // Data size includes key and value
 					lock.Unlock()
 				}
 			} else if op < setRatio+getRatio {
 				// GET operation
 				start := time.Now()
-				if _, err := rdb.Get(ctx, key).Result(); err == nil || err == redis.Nil {
+				result, err := rdb.Get(ctx, key).Result()
+				if err == nil || err == redis.Nil {
 					duration := time.Since(start).Seconds() * 1000
 					updateStats(getStats, duration)
 					lock.Lock()
 					progress["get"]++
 					*totalGet++
+					*totalGetData += int64(len(result)) + int64(len(key)) // Data size includes key and value
 					lock.Unlock()
 				}
 			} else {
